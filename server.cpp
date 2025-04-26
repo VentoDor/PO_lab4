@@ -2,66 +2,68 @@
 #include <vector>
 #include <thread>
 #include <mutex>
-#include <cstring>
-#include <atomic>
-#include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <cstring>
 
 #define PORT 12345
-#define BUFFER_SIZE 4096
 
 std::mutex cout_mutex;
 
 enum class ComputationStatus {
-    NOT_STARTED,
     IN_PROGRESS,
     DONE
 };
 
 struct ClientData {
-    std::vector<int32_t> A, B, C;
     uint32_t n;
     uint32_t threads;
-    ComputationStatus status = ComputationStatus::NOT_STARTED;
+    std::vector<int32_t> A;
+    std::vector<int32_t> B;
+    std::vector<int32_t> C;
+    ComputationStatus status;
 };
 
-uint32_t toBigEndian(uint32_t value) {
-    return htonl(value);
-}
-
-uint32_t fromBigEndian(uint32_t value) {
-    return ntohl(value);
-}
-
-bool recvAll(int sock, char* buffer, int totalBytes) {
-    int received = 0;
-    while (received < totalBytes) {
-        int ret = recv(sock, buffer + received, totalBytes - received, 0);
-        if (ret <= 0) return false;
-        received += ret;
-    }
-    return true;
-}
-
-bool sendAll(int sock, const char* buffer, int totalBytes) {
-    int sent = 0;
-    while (sent < totalBytes) {
-        int ret = send(sock, buffer + sent, totalBytes - sent, 0);
-        if (ret <= 0) return false;
-        sent += ret;
-    }
-    return true;
-}
-
 void computePart(ClientData& data, int startRow, int endRow) {
-    uint32_t n = data.n;
+    int n = data.n;
     for (int i = startRow; i < endRow; ++i) {
-        for (uint32_t j = 0; j < n; ++j) {
-            data.C[i * n + j] = data.A[i * n + j] + data.B[i * n + j];
+        for (int j = 0; j < n; ++j) {
+            int32_t sum = 0;
+            for (int k = 0; k < n; ++k) {
+                sum += data.A[i * n + k] * data.B[k * n + j];
+            }
+            data.C[i * n + j] = sum;
         }
     }
+}
+
+uint32_t toBigEndian(uint32_t val) {
+    return htonl(val);
+}
+
+uint32_t fromBigEndian(uint32_t val) {
+    return ntohl(val);
+}
+
+bool recvAll(int sock, char* buffer, int bytes) {
+    int totalReceived = 0;
+    while (totalReceived < bytes) {
+        int received = recv(sock, buffer + totalReceived, bytes - totalReceived, 0);
+        if (received <= 0) return false;
+        totalReceived += received;
+    }
+    return true;
+}
+
+bool sendAll(int sock, const char* buffer, int bytes) {
+    int totalSent = 0;
+    while (totalSent < bytes) {
+        int sent = send(sock, buffer + totalSent, bytes - totalSent, 0);
+        if (sent <= 0) return false;
+        totalSent += sent;
+    }
+    return true;
 }
 
 void handleClient(int clientSocket) {
@@ -83,7 +85,8 @@ void handleClient(int clientSocket) {
 
     {
         std::lock_guard<std::mutex> lock(cout_mutex);
-        std::cout << "[SERVER] Matrix size: " << data.n << " Threads: " << data.threads << "\n";
+        std::cout << "[SERVER] Matrix size received: " << data.n
+                  << " | Threads requested: " << data.threads << std::endl;
     }
 
     int totalElements = data.n * data.n;
@@ -95,9 +98,18 @@ void handleClient(int clientSocket) {
         close(clientSocket);
         return;
     }
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << "[SERVER] Matrix A received." << std::endl;
+    }
+
     if (!recvAll(clientSocket, (char*)data.B.data(), totalElements * sizeof(int32_t))) {
         close(clientSocket);
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << "[SERVER] Matrix B received." << std::endl;
     }
 
     bool running = true;
@@ -119,10 +131,10 @@ void handleClient(int clientSocket) {
         if (command == "START") {
             {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[SERVER] Command START received.\n";
+                std::cout << "[SERVER] Command START received. Starting computation..." << std::endl;
             }
-            data.status = ComputationStatus::IN_PROGRESS;
 
+            data.status = ComputationStatus::IN_PROGRESS;
             std::vector<std::thread> workers;
             int rowsPerThread = data.n / data.threads;
             int extraRows = data.n % data.threads;
@@ -139,6 +151,11 @@ void handleClient(int clientSocket) {
                 th.join();
             }
 
+            {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "[SERVER] Computation finished." << std::endl;
+            }
+
             data.status = ComputationStatus::DONE;
         }
         else if (command == "STATUS") {
@@ -146,18 +163,26 @@ void handleClient(int clientSocket) {
             uint32_t statusLen = toBigEndian(statusMsg.size());
             sendAll(clientSocket, (char*)&statusLen, sizeof(statusLen));
             sendAll(clientSocket, statusMsg.c_str(), statusMsg.size());
+            {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "[SERVER] STATUS request processed: " << statusMsg << std::endl;
+            }
         }
         else if (command == "GET_RESULT") {
             if (data.status == ComputationStatus::DONE) {
                 uint32_t payloadSize = toBigEndian(totalElements * sizeof(int32_t));
                 sendAll(clientSocket, (char*)&payloadSize, sizeof(payloadSize));
                 sendAll(clientSocket, (char*)data.C.data(), totalElements * sizeof(int32_t));
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << "[SERVER] Result matrix sent to client." << std::endl;
+                }
                 running = false;
             }
         }
         else {
             std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[SERVER] Unknown command: " << command << "\n";
+            std::cout << "[SERVER] Unknown command: " << command << std::endl;
             close(clientSocket);
             return;
         }
@@ -168,23 +193,21 @@ void handleClient(int clientSocket) {
 
 int main() {
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_addr.s_addr = INADDR_ANY;
     serverAddr.sin_port = htons(PORT);
 
     bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
-    listen(serverSocket, SOMAXCONN);
+    listen(serverSocket, 5);
 
-    std::cout << "[SERVER] Listening on port " << PORT << "...\n";
+    std::cout << "[SERVER] Server started. Listening on port " << PORT << "..." << std::endl;
 
     while (true) {
-        int clientSocket = accept(serverSocket, nullptr, nullptr);
-        if (clientSocket != -1) {
-            std::thread clientThread(handleClient, clientSocket);
-            clientThread.detach();
-        }
+        sockaddr_in clientAddr{};
+        socklen_t clientSize = sizeof(clientAddr);
+        int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
+        std::thread(handleClient, clientSocket).detach();
     }
 
     close(serverSocket);
