@@ -12,6 +12,8 @@
 #define SERVER_IP "127.0.0.1"
 #define PORT 12345
 
+using namespace std::chrono;
+
 uint32_t toBigEndian(uint32_t val) {
     return htonl(val);
 }
@@ -101,6 +103,8 @@ int main() {
 
     sendCommand(sock, "START");
 
+    auto startTime = high_resolution_clock::now();
+
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         sendCommand(sock, "STATUS");
@@ -122,15 +126,18 @@ int main() {
     std::vector<int32_t> C(totalElements);
     recvAll(sock, (char*)C.data(), resultSize);
 
-    std::cout << "[CLIENT] Result matrix received:\n";
-    for (uint32_t i = 0; i < n; ++i) {
-        for (uint32_t j = 0; j < n; ++j) {
-            std::cout << C[i * n + j] << "\t";
-        }
-        std::cout << "\n";
-    }
+    auto endTime = high_resolution_clock::now();
+    double elapsedSeconds = duration<double>(endTime - startTime).count();
 
-    close(sock);
-    std::cout << "[CLIENT] Disconnected.\n";
-    return 0;
+    std::cout << "[CLIENT] Result matrix received in " << elapsedSeconds << " seconds.\n";
+    for (uint32_t i = 0; i < n; ++i) {
+      for (uint32_t j = 0; j < n; ++j) {
+          std::cout << C[i * n + j] << "\t";
+      }
+      std::cout << "\n";
+  }
+
+  close(sock);
+  std::cout << "[CLIENT] Disconnected.\n";
+  return 0;
 }

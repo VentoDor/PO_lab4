@@ -2,6 +2,7 @@
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <chrono>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -135,81 +136,86 @@ void handleClient(int clientSocket) {
             }
 
             data.status = ComputationStatus::IN_PROGRESS;
+
+            auto startTime = std::chrono::high_resolution_clock::now();
+
             std::vector<std::thread> workers;
             int rowsPerThread = data.n / data.threads;
             int extraRows = data.n % data.threads;
             int currentRow = 0;
-
             for (uint32_t i = 0; i < data.threads; ++i) {
-                int startRow = currentRow;
-                int endRow = startRow + rowsPerThread + (i < extraRows ? 1 : 0);
-                workers.emplace_back(computePart, std::ref(data), startRow, endRow);
-                currentRow = endRow;
-            }
+              int startRow = currentRow;
+              int endRow = startRow + rowsPerThread + (i < extraRows ? 1 : 0);
+              workers.emplace_back(computePart, std::ref(data), startRow, endRow);
+              currentRow = endRow;
+          }
 
-            for (auto& th : workers) {
-                th.join();
-            }
+          for (auto& th : workers) {
+              th.join();
+          }
 
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[SERVER] Computation finished." << std::endl;
-            }
+          auto endTime = std::chrono::high_resolution_clock::now();
+          double elapsedSeconds = std::chrono::duration<double>(endTime - startTime).count();
 
-            data.status = ComputationStatus::DONE;
-        }
-        else if (command == "STATUS") {
-            std::string statusMsg = (data.status == ComputationStatus::DONE) ? "DONE" : "IN_PROGRESS";
-            uint32_t statusLen = toBigEndian(statusMsg.size());
-            sendAll(clientSocket, (char*)&statusLen, sizeof(statusLen));
-            sendAll(clientSocket, statusMsg.c_str(), statusMsg.size());
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[SERVER] STATUS request processed: " << statusMsg << std::endl;
-            }
-        }
-        else if (command == "GET_RESULT") {
-            if (data.status == ComputationStatus::DONE) {
-                uint32_t payloadSize = toBigEndian(totalElements * sizeof(int32_t));
-                sendAll(clientSocket, (char*)&payloadSize, sizeof(payloadSize));
-                sendAll(clientSocket, (char*)data.C.data(), totalElements * sizeof(int32_t));
-                {
-                    std::lock_guard<std::mutex> lock(cout_mutex);
-                    std::cout << "[SERVER] Result matrix sent to client." << std::endl;
-                }
-                running = false;
-            }
-        }
-        else {
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[SERVER] Unknown command: " << command << std::endl;
-            close(clientSocket);
-            return;
-        }
-    }
+          {
+              std::lock_guard<std::mutex> lock(cout_mutex);
+              std::cout << "[SERVER] Computation finished in " << elapsedSeconds << " seconds." << std::endl;
+          }
 
-    close(clientSocket);
+          data.status = ComputationStatus::DONE;
+      }
+      else if (command == "STATUS") {
+          std::string statusMsg = (data.status == ComputationStatus::DONE) ? "DONE" : "IN_PROGRESS";
+          uint32_t statusLen = toBigEndian(statusMsg.size());
+          sendAll(clientSocket, (char*)&statusLen, sizeof(statusLen));
+          sendAll(clientSocket, statusMsg.c_str(), statusMsg.size());
+          {
+              std::lock_guard<std::mutex> lock(cout_mutex);
+              std::cout << "[SERVER] STATUS request processed: " << statusMsg << std::endl;
+          }
+      }
+      else if (command == "GET_RESULT") {
+          if (data.status == ComputationStatus::DONE) {
+              uint32_t payloadSize = toBigEndian(totalElements * sizeof(int32_t));
+              sendAll(clientSocket, (char*)&payloadSize, sizeof(payloadSize));
+              sendAll(clientSocket, (char*)data.C.data(), totalElements * sizeof(int32_t));
+              {
+                  std::lock_guard<std::mutex> lock(cout_mutex);
+                  std::cout << "[SERVER] Result matrix sent to client." << std::endl;
+              }
+              running = false;
+          }
+      }
+      else {
+          std::lock_guard<std::mutex> lock(cout_mutex);
+          std::cout << "[SERVER] Unknown command: " << command << std::endl;
+          close(clientSocket);
+          return;
+      }
+  }
+
+  close(clientSocket);
 }
 
 int main() {
-    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(PORT);
+  int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in serverAddr{};
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_addr.s_addr = INADDR_ANY;
+  serverAddr.sin_port = htons(PORT);
 
-    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
-    listen(serverSocket, 5);
+  bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+  listen(serverSocket, 5);
 
-    std::cout << "[SERVER] Server started. Listening on port " << PORT << "..." << std::endl;
+  std::cout << "[SERVER] Server started. Listening on port " << PORT << "..." << std::endl;
 
-    while (true) {
-        sockaddr_in clientAddr{};
-        socklen_t clientSize = sizeof(clientAddr);
-        int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
-        std::thread(handleClient, clientSocket).detach();
-    }
+  while (true) {
+      sockaddr_in clientAddr{};
+      socklen_t clientSize = sizeof(clientAddr);
+      int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
+      std::thread(handleClient, clientSocket).detach();
+  }
 
-    close(serverSocket);
-    return 0;
+  close(serverSocket);
+  return 0;
 }
